@@ -1,0 +1,8 @@
+{
+    "name": "map-warper-be",
+    "proxy": {
+      "memory": 512,
+      "timeout": 10
+    },
+    "environment": {}
+  }

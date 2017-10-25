@@ -9,14 +9,17 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/labstack/echo"
 
 	b64 "encoding/base64"
 )
 
 const (
-	tifTranslated = "translated.tif"
-	tifWarped     = "warped.tif"
+	tifTranslated = "/tmp/translated.tif"
+	tifWarped     = "/tmp/warped.tif"
 )
 
 type data struct {
@@ -41,7 +44,7 @@ type geoCoords struct {
 }
 
 func main() {
-	addr := ":" + os.Getenv("PORT") // ":35986"
+	addr := ":" + os.Getenv("PORT")
 
 	e := echo.New()
 	e.POST("/", uploadHandler)
@@ -63,7 +66,7 @@ func uploadHandler(c echo.Context) error {
 	}
 
 	frmt := strings.Split(d.Filename, ".")[1]
-	newFilename := fmt.Sprintf("/tmp/new.%s", frmt) // /tmp/ in labmda
+	newFilename := fmt.Sprintf("/tmp/new.%s", frmt)
 	f, err := os.Create(newFilename)
 	if err != nil {
 		log.Println(err)
@@ -75,14 +78,21 @@ func uploadHandler(c echo.Context) error {
 
 	err = gdalTranslate(newFilename, d.Points)
 	if err != nil {
-		fmt.Println("gdal_translate")
+		log.Println("gdal_translate")
 		log.Println(err)
 		c.Error(err)
 	}
 
 	err = gdalWarp()
 	if err != nil {
-		fmt.Println("gdalwarp")
+		log.Println("gdalwarp")
+		log.Println(err)
+		c.Error(err)
+	}
+
+	err = uploadToS3()
+	if err != nil {
+		log.Println("uploadToS3")
 		log.Println(err)
 		c.Error(err)
 	}
@@ -91,13 +101,6 @@ func uploadHandler(c echo.Context) error {
 }
 
 func gdalTranslate(file string, points []point) error {
-	wd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	log.Println(wd)
-	os.Setenv("LD_LIBRARY_PATH", wd)
-
 	gdalTr := "./gdal_translate"
 	args := []string{"-of", "GTiff"}
 	for _, p := range points {
@@ -112,7 +115,7 @@ func gdalTranslate(file string, points []point) error {
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	fmt.Println(stdout.String())
 	if err != nil {
 		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
@@ -122,27 +125,52 @@ func gdalTranslate(file string, points []point) error {
 }
 
 func gdalWarp() error {
-	wd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	log.Println(wd)
-	os.Setenv("PWD", wd)
+	os.Setenv("GDAL_DATA", "/var/task/data")
 
 	warp := "./gdalwarp"
 	args := []string{"-t_srs", "EPSG:4326"}
 	args = append(args, tifTranslated, tifWarped)
+	log.Println(args)
 
 	cmd := exec.Command(warp, args...)
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
-	err = cmd.Run()
+	err := cmd.Run()
 	fmt.Println(stdout.String())
 	if err != nil {
 		fmt.Println(fmt.Sprint(err) + ": " + stderr.String())
 		return err
 	}
 	return nil
+}
+
+func uploadToS3() error {
+	log.Println("uploadToS3: START")
+	// The session the S3 Uploader will use
+	sess := session.Must(session.NewSession())
+	log.Println("uploadToS3: after session must")
+
+	// Create an uploader with the session and default options
+	uploader := s3manager.NewUploader(sess)
+	log.Println("uploadToS3: after uploader creating")
+
+	f, err := os.Open(tifWarped)
+	if err != nil {
+		log.Println("uploadToS3: file open error")
+		log.Println(err)
+		return err
+	}
+
+	// Upload the file to S3.
+	result, err := uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String("map-warper-be-test"),
+		Key:    aws.String(f.Name()),
+		Body:   f,
+	})
+	log.Println("uploadToS3: after upload")
+	log.Println(err)
+	log.Println(result)
+	return err
 }
